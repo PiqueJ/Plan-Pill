@@ -1,0 +1,318 @@
+// ============================================================
+//  PlanPill — Schema Visualizer สำหรับ https://dbdiagram.io
+//
+//  วิธีใช้: เปิด dbdiagram.io > Go to App แล้ววางเนื้อหาทั้งไฟล์ในช่องโค้ดด้านซ้าย
+//
+//  สร้างจากสถานะล่าสุดของ schema.sql + migrate-01 ถึง migrate-05
+//  เวลาแก้ schema.sql หรือเพิ่ม migration ต้องแก้ไฟล์นี้ให้ตรงกันด้วย
+//
+//  เส้นเชื่อม (Ref) ในไฟล์นี้คือ foreign key จริงเท่านั้น
+//  ความสัมพันธ์ผ่าน text[] (food_risk_codes, food_codes) ไม่มี FK
+//  จึงเขียนไว้ใน note ของคอลัมน์แทน
+// ============================================================
+
+Project PlanPill {
+  database_type: 'PostgreSQL'
+  Note: '''
+  แอปจัดการและแจ้งเตือนการรับประทานยา พร้อมตรวจปฏิกิริยายา-อาหาร และยา-ยา (Supabase)
+
+  - ตารางอ้างอิง: ข้อมูลกลางจาก DDInter 2.0 ผู้ใช้ที่ล็อกอินอ่านได้ แต่เขียนไม่ได้
+  - ตารางผู้ใช้: เปิด RLS ทุกตาราง `auth.uid() = user_id`
+  '''
+}
+
+
+// ============================================================
+//  ENUM
+// ============================================================
+
+Enum severity_level {
+  major    [note: 'อันตราย']
+  moderate [note: 'ควรระวัง']
+  minor    [note: 'เล็กน้อย']
+}
+
+Enum meal_relation {
+  before_meal [note: 'ก่อนอาหาร']
+  after_meal  [note: 'หลังอาหาร']
+  with_meal   [note: 'พร้อมอาหาร']
+  independent [note: 'ไม่เกี่ยวกับมื้ออาหาร']
+}
+
+Enum meal_type {
+  breakfast [note: 'มื้อเช้า']
+  lunch     [note: 'มื้อกลางวัน']
+  dinner    [note: 'มื้อเย็น']
+  snack     [note: 'ของว่าง']
+}
+
+Enum dose_status {
+  upcoming [note: 'ยังไม่ถึงเวลา']
+  reminded [note: 'แจ้งเตือนแล้ว รอผู้ใช้ยืนยัน']
+  taken    [note: 'ผู้ใช้กดยืนยันว่ารับประทานแล้ว']
+  skipped  [note: 'ผู้ใช้กดข้ามมื้อนี้']
+  missed   [note: 'เลยเวลาโดยไม่มีการยืนยัน (ระบบตั้งให้อัตโนมัติ)']
+}
+
+Enum log_source {
+  manual [note: 'ผู้ใช้กดเอง']
+  auto   [note: 'ระบบตั้งให้อัตโนมัติ']
+}
+
+
+// ============================================================
+//  Supabase Auth (Supabase จัดการเอง ไม่ได้สร้างใน schema.sql)
+// ============================================================
+
+Table auth.users [headercolor: #7F8C8D] {
+  id    uuid [pk]
+  email text
+
+  Note: 'ตารางของ Supabase Auth แสดงเฉพาะคอลัมน์ที่ตารางอื่นอ้างถึง'
+}
+
+
+// ============================================================
+//  1. ตารางอ้างอิง (DDInter 2.0) — อ่านได้อย่างเดียว
+// ============================================================
+
+Table food_categories [headercolor: #16A085] {
+  code        text    [pk, note: "เช่น 'dairy', 'vitamin_k'"]
+  label_th    text    [not null, note: 'ชื่อหมวดภาษาไทยที่แสดงในแอป']
+  examples_th text    [not null, note: 'ตัวอย่างอาหาร ช่วยให้ผู้ใช้เลือกถูกหมวด']
+  sort_order  int     [not null, default: 0]
+  selectable  boolean [not null, default: true, note: 'false = ไม่ให้ติ๊กในไดอารี่มื้ออาหาร (with_food, smoking)']
+
+  Note: 'หมวดอาหารที่มีข้อควรระวังทางยา 17 หมวด (migrate-01)'
+}
+
+Table drug_reference [headercolor: #16A085] {
+  id          uuid        [pk, default: `gen_random_uuid()`]
+  name_en     text        [not null, unique, note: "ชื่อสามัญภาษาอังกฤษ ไม่แปล เช่น 'Acetaminophen'"]
+  category_th text        [note: "หมวดยาภาษาไทย เช่น 'ยาแก้ปวด / ลดไข้'"]
+  created_at  timestamptz [not null, default: `now()`]
+
+  indexes {
+    name_en [name: 'drug_reference_name_trgm_idx', note: 'GIN (name_en gin_trgm_ops) สำหรับ fuzzy search']
+  }
+
+  Note: 'ยาอ้างอิงที่คัดมา 61 ตัว'
+}
+
+Table drug_aliases [headercolor: #16A085] {
+  id         uuid [pk, default: `gen_random_uuid()`]
+  drug_id    uuid [not null]
+  alias      text [not null, note: "เช่น 'Paracetamol', 'พารา', 'ซาร่า'"]
+  alias_type text [not null, check: `alias_type in ('inn', 'thai', 'brand', 'abbrev')`]
+
+  indexes {
+    (drug_id, alias) [unique]
+    alias [name: 'drug_aliases_alias_trgm_idx', note: 'GIN (alias gin_trgm_ops)']
+  }
+
+  Note: 'ชื่อพ้องของยา ให้ผู้ใช้ค้นด้วยชื่อที่คุ้นเคยแล้วเจอชื่อมาตรฐาน (migrate-02)'
+}
+
+Table drug_food_interactions [headercolor: #16A085] {
+  id             uuid           [pk, default: `gen_random_uuid()`]
+  drug_id        uuid           [not null]
+  food_code      text           [not null]
+  severity       severity_level [not null]
+  mechanism_th   text           [note: 'คำแปลไทย null = ยังไม่แปล ให้แอปแสดง description_en แทน']
+  management_th  text
+  source_note    text           [note: "ที่มาของข้อมูล เช่น 'DDInter 2.0'"]
+  description_en text           [note: 'ต้นฉบับจาก DDInter ถูกตัดที่ ~200 ตัวอักษรตั้งแต่ต้นทาง']
+  management_en  text
+  mechanism_type text           [note: 'เช่น Absorption, Metabolism, Synergy']
+  food_name_en   text           [note: "ชื่ออาหารต้นฉบับ เช่น 'grapefruit juice'"]
+
+  indexes {
+    (drug_id, food_code) [unique]
+  }
+}
+
+Table drug_drug_interactions [headercolor: #16A085] {
+  id            uuid           [pk, default: `gen_random_uuid()`]
+  drug_a_id     uuid           [not null]
+  drug_b_id     uuid           [not null]
+  severity      severity_level [not null]
+  mechanism_th  text           [note: 'DDInter ไม่มีคำอธิบายของคู่ยา-ยา จึงเป็น null ได้']
+  management_th text
+  source_note   text
+
+  indexes {
+    (drug_a_id, drug_b_id) [unique]
+  }
+
+  checks {
+    `drug_a_id < drug_b_id` [name: 'drug_pair_ordered']
+  }
+
+  Note: 'เก็บคู่ยาเรียงจากน้อยไปมากเสมอ กัน (A,B) กับ (B,A) กลายเป็นคนละแถว'
+}
+
+
+// ============================================================
+//  2. ตารางข้อมูลผู้ใช้ — RLS: auth.uid() = user_id
+// ============================================================
+
+Table medications [headercolor: #2980B9] {
+  id                   uuid          [pk, default: `gen_random_uuid()`]
+  user_id              uuid          [not null]
+  drug_id              uuid          [note: 'null = ยาที่ไม่มีในฐานอ้างอิง จึงตรวจปฏิกิริยาไม่ได้']
+  name                 text          [not null, note: 'คัดลอกจาก drug_reference ตอนเพิ่มยา']
+  dosage               text          [not null]
+  quantity             int           [not null, default: 0, check: `quantity between 0 and 999`]
+  reminder_times       "text[]"      [not null, default: '{}', note: "รูปแบบ HH:MM เช่น ['08:00', '20:00']"]
+  meal_relation        meal_relation [not null, default: 'independent']
+  food_risk_codes      "text[]"      [not null, default: '{}', note: 'code ของ food_categories (คัดลอกมาตอนเพิ่มยา ไม่มี FK)']
+  note                 text          [not null, default: '']
+  status               text          [not null, default: 'active', check: `status in ('active', 'paused')`]
+  created_at           timestamptz   [not null, default: `now()`]
+  reminders_updated_at timestamptz   [not null, default: `now()`, note: 'กันไม่ให้สร้างประวัติย้อนหลังของเวลาที่เพิ่งเพิ่ม']
+  updated_at           timestamptz   [not null, default: `now()`, note: 'trigger medications_set_updated_at อัปเดตให้อัตโนมัติ']
+
+  indexes {
+    (user_id, name) [unique]
+    (user_id, status) [name: 'medications_user_status_idx']
+  }
+}
+
+Table meals [headercolor: #2980B9] {
+  id         uuid        [pk, default: `gen_random_uuid()`]
+  user_id    uuid        [not null]
+  eaten_at   timestamptz [not null]
+  meal_type  meal_type   [not null]
+  name       text        [not null, default: '', note: "ชื่อมื้อแบบพิมพ์อิสระ เช่น 'ข้าวมันไก่'"]
+  food_codes "text[]"    [not null, default: '{}', note: 'code ของ food_categories ที่ผู้ใช้ติ๊ก (ไม่มี FK)']
+  photo_path text        [note: 'path ใน Storage bucket meal-photos รูปแบบ <user_id>/<meal_id>.jpg (null = ไม่ได้ถ่ายรูป)']
+  note       text        [not null, default: '']
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (user_id, eaten_at) [name: 'meals_user_eaten_idx', note: 'eaten_at DESC']
+  }
+}
+
+Table dose_logs [headercolor: #2980B9] {
+  id              uuid        [pk, default: `gen_random_uuid()`]
+  user_id         uuid        [not null]
+  medication_id   uuid        [note: 'null ได้เมื่อผู้ใช้ลบยาไปแล้ว']
+  medication_name text        [not null, note: 'เก็บซ้ำไว้ ให้ประวัติอ่านรู้เรื่องแม้ยาถูกลบ']
+  dosage          text        [not null]
+  scheduled_at    timestamptz [not null]
+  taken_at        timestamptz
+  status          dose_status [not null, default: 'upcoming']
+  source          log_source
+  created_at      timestamptz [not null, default: `now()`]
+
+  indexes {
+    (user_id, medication_id, scheduled_at) [unique, note: '1 มื้อ มี log ได้แถวเดียว']
+    (user_id, scheduled_at) [name: 'dose_logs_user_sched_idx', note: 'scheduled_at DESC']
+  }
+
+  Note: 'trigger dose_logs_skip_cleared (migrate-05) ข้ามการ insert แถวที่ source ไม่ใช่ manual และ scheduled_at ก่อน user_settings.history_cleared_at'
+}
+
+Table user_settings [headercolor: #2980B9] {
+  user_id            uuid        [pk, note: 'ผู้ใช้ 1 คน มีได้แถวเดียว']
+  history_cleared_at timestamptz [note: 'เวลาที่กดล้างประวัติ null = ไม่เคยล้าง ทุกเครื่องอ่านค่าเดียวกัน']
+  updated_at         timestamptz [not null, default: `now()`]
+
+  Note: 'เพิ่มใน migrate-05-user-settings.sql'
+}
+
+Table interaction_alerts [headercolor: #2980B9] {
+  id            uuid           [pk, default: `gen_random_uuid()`]
+  user_id       uuid           [not null]
+  meal_id       uuid
+  medication_id uuid
+  kind          text           [not null, check: `kind in ('drug_food', 'drug_drug')`]
+  severity      severity_level [not null]
+  message_th    text           [not null]
+  created_at    timestamptz    [not null, default: `now()`]
+
+  indexes {
+    (user_id, created_at) [name: 'alerts_user_created_idx', note: 'created_at DESC']
+  }
+
+  Note: 'คำเตือนปฏิกิริยาที่ระบบเคยแสดง ใช้ย้อนดูในหน้าประวัติ'
+}
+
+
+// ============================================================
+//  Foreign key
+// ============================================================
+
+// เจ้าของข้อมูล
+Ref: medications.user_id        > auth.users.id [delete: cascade]
+Ref: meals.user_id              > auth.users.id [delete: cascade]
+Ref: dose_logs.user_id          > auth.users.id [delete: cascade]
+Ref: interaction_alerts.user_id > auth.users.id [delete: cascade]
+Ref: user_settings.user_id      - auth.users.id [delete: cascade]
+
+// ตารางอ้างอิง
+Ref: drug_aliases.drug_id             > drug_reference.id    [delete: cascade]
+Ref: drug_food_interactions.drug_id   > drug_reference.id    [delete: cascade]
+Ref: drug_food_interactions.food_code > food_categories.code [delete: cascade]
+Ref: drug_drug_interactions.drug_a_id > drug_reference.id    [delete: cascade]
+Ref: drug_drug_interactions.drug_b_id > drug_reference.id    [delete: cascade]
+
+// ข้อมูลผู้ใช้ ↔ ข้อมูลผู้ใช้ / ตารางอ้างอิง
+Ref: medications.drug_id              > drug_reference.id [delete: set null]
+Ref: dose_logs.medication_id          > medications.id    [delete: set null]
+Ref: interaction_alerts.meal_id       > meals.id          [delete: cascade]
+Ref: interaction_alerts.medication_id > medications.id    [delete: cascade]
+
+
+// ============================================================
+//  กลุ่มตาราง
+// ============================================================
+
+TableGroup supabase_auth [color: #7F8C8D] {
+  auth.users
+}
+
+TableGroup reference_ddinter [color: #16A085] {
+  food_categories
+  drug_reference
+  drug_aliases
+  drug_food_interactions
+  drug_drug_interactions
+
+  Note: 'ผู้ใช้ที่ล็อกอินอ่านได้ทุกคน ไม่มี policy สำหรับเขียน'
+}
+
+TableGroup user_data [color: #2980B9] {
+  medications
+  meals
+  dose_logs
+  interaction_alerts
+  user_settings
+
+  Note: 'RLS: auth.uid() = user_id ทั้ง using และ with check'
+}
+
+
+// ============================================================
+//  Sticky note — ส่วนที่ไม่ใช่ตาราง
+// ============================================================
+
+Note rpc_functions {
+  '''
+  **RPC function** (ไม่ใช้ security definer เพื่อให้ RLS ของผู้เรียกกรองข้อมูล)
+
+  - `search_drugs(q, max_results)` ค้น drug_reference + drug_aliases ด้วย pg_trgm
+  - `check_drug_drug(p_drug_id)` ยาใหม่ตีกับยา active ที่กินอยู่หรือไม่
+  - `check_meal_interactions(p_food_codes)` หมวดอาหารในมื้อตีกับยา active หรือไม่ (เฉพาะ selectable = true)
+  '''
+}
+
+Note storage_bucket {
+  '''
+  **Storage: meal-photos** (private, สูงสุด 5 MB, jpeg/png/webp)
+
+  ไฟล์อยู่ที่ `<user_id>/<meal_id>.jpg` และ policy ให้เข้าถึงได้เฉพาะโฟลเดอร์ของตัวเอง
+  แอปเปิดรูปผ่าน signed URL เท่านั้น
+  '''
+}

@@ -1,0 +1,67 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env
+.env.*
+!.env.example
+
+# ข้อมูลดิบจาก DDInter (~13MB) ไม่ commit ขึ้น git
+# สิ่งที่ commit คือ seed-ddinter.sql ที่สร้างจากไฟล์เหล่านี้
+# วิธีดาวน์โหลดใหม่อยู่ใน planpill-schema/README.md
+planpill-schema/ddinter-raw/
+
+# typescript
+*.tsbuildinfo
+
+app-example
+
+# generated native folders
+/ios
+/android
+
+# Python cache จากสคริปต์ build_seed.py
+__pycache__/
+*.pyc
+
+# วิดีโอสาธิต ไฟล์ใหญ่เกินกว่าที่ GitHub รับ (100 MB) อัปขึ้น YouTube/Drive แล้วใส่ลิงก์ใน README แทน
+*.mov
+*.mp4
+
+# ไฟล์ตั้งค่าของ Claude Code ใช้เฉพาะในเครื่อง
+.claude/
+
+# ไม่เกี่ยวกับตัวแอป
+CLAUDE.md
+AGENTS.md
+.vscode/
+app-icon/
